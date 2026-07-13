@@ -82,10 +82,16 @@ impl AudioContext {
 }
 
 fn audio_thread_loop(rx: mpsc::Receiver<SoundCommand>) {
-    let mut ctx = AudioContext::try_new();
+    // 空闲一段时间后释放音频设备，避免长期占用 WASAPI 会话而阻止系统休眠
+    const IDLE_RELEASE: Duration = Duration::from_secs(5);
+    const IDLE_POLL: Duration = Duration::from_secs(30);
+
+    let mut ctx: Option<AudioContext> = None;
 
     loop {
-        match rx.recv_timeout(Duration::from_secs(2)) {
+        // 有设备时用较短超时以便及时释放，空闲时用较长轮询避免忙等
+        let timeout = if ctx.is_some() { IDLE_RELEASE } else { IDLE_POLL };
+        match rx.recv_timeout(timeout) {
             Ok(cmd) => {
                 // 检查设备变化或上下文无效
                 let need_reinit = ctx.as_ref().map_or(true, |c| c.device_changed());
@@ -108,10 +114,8 @@ fn audio_thread_loop(rx: mpsc::Receiver<SoundCommand>) {
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                // 定期检查设备变化
-                if ctx.as_ref().map_or(true, |c| c.device_changed()) {
-                    ctx = AudioContext::try_new();
-                }
+                // 空闲超时：释放音频设备，结束 WASAPI 会话以便系统进入休眠
+                ctx = None;
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
